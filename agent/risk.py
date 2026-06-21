@@ -128,11 +128,11 @@ def dynamic_plan(holdings: dict[str, float], picks: dict[str, float], exits: set
     free_usdt = holdings.get(SETTLEMENT, 0.0) + sum(u for _, _, u in sells)
     budget = min(free_usdt - cfg.stable_floor * eq, cfg.aggression * eq - risk_on_value)
     buys: list[tuple[str, str, float]] = []
-    fresh = [t for t in picks if t not in kept]
+    fresh = [t for t in picks if t not in kept and t not in exits]  # don't re-enter a name we just stopped
     slots = cfg.n_vehicles - len(kept)
     if budget > cfg.min_swap and slots > 0 and fresh:
         per = min(cfg.max_token * eq, budget / min(slots, len(fresh)))
-        for t in sorted(fresh, key=lambda t: -picks[t])[:slots]:
+        for t in sorted(fresh, key=lambda t: (-picks[t], t))[:slots]:
             if per > cfg.min_swap:
                 buys.append((SETTLEMENT, t, round(per, 6)))
     return sells + buys

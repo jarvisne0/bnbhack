@@ -48,7 +48,8 @@ def select(signals: dict[str, dict[str, float]], risk_ok: dict[str, bool],
     scored = score({t: s for t, s in signals.items() if risk_ok.get(t, False)})
     if not scored:
         return {}
-    ranked = sorted(scored.items(), key=lambda kv: kv[1], reverse=True)[:cfg.n_vehicles]
+    # rank by score desc, breaking ties by token so the choice is canonical (Rust-parity)
+    ranked = sorted(scored.items(), key=lambda kv: (-kv[1], kv[0]))[:cfg.n_vehicles]
     floor = min(v for _, v in ranked)
     # shift so the lowest pick gets a small positive weight, the top pick the largest
     return {t: (v - floor) + 1.0 for t, v in ranked}

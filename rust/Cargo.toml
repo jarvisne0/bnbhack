@@ -1,0 +1,17 @@
+[package]
+name = "bnbagent"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bnbagent"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json", "tls"] }
+
+[profile.release]
+panic = "abort"
+overflow-checks = true
