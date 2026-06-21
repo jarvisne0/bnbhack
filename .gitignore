@@ -1,0 +1,7 @@
+.cmc_key
+data/
+__pycache__/
+*.pyc
+agent/state.json
+*.env
+.env*
