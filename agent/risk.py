@@ -77,3 +77,74 @@ def worst_case_drawdown(target: dict[str, float]) -> float:
     """
     risk = {t: w for t, w in target.items() if t != SETTLEMENT}
     return max(risk.values(), default=0.0)
+
+
+def track_positions(held: dict[str, float], peaks: dict[str, float],
+                    entries: dict[str, float]) -> tuple[dict[str, float], dict[str, float]]:
+    """Carry per-position entry value and running peak, observed from live holdings.
+
+    A token first seen held records its current value as entry; peaks ratchet up; tokens no
+    longer held are dropped. Reality-driven, so it stays correct regardless of fill success.
+    """
+    new_peaks = {t: max(peaks.get(t, v), v) for t, v in held.items()}
+    new_entries = {t: entries.get(t, v) for t, v in held.items()}
+    return new_peaks, new_entries
+
+
+def stop_exits(held: dict[str, float], peaks: dict[str, float],
+               entries: dict[str, float], cfg: Config) -> set[str]:
+    """Positions to liquidate now: fell `trail` from peak, or `stop_loss` underwater from entry."""
+    out = set()
+    for t, v in held.items():
+        pk, en = peaks.get(t, v), entries.get(t, v)
+        if (pk > 0 and v <= pk * (1 - cfg.trail)) or (en > 0 and v <= en * (1 - cfg.stop_loss)):
+            out.add(t)
+    return out
+
+
+def dynamic_plan(holdings: dict[str, float], picks: dict[str, float], exits: set[str],
+                 cfg: Config) -> list[tuple[str, str, float]]:
+    """Stops-aware rebalance: cut stopped names, trim only above the rug ceiling, let the rest
+    ride, and deploy free USDT (above the stable floor) into fresh picks — never trimming a
+    winner back to its entry weight. Everything routes through USDT; sells precede buys.
+    """
+    eq = equity(holdings)
+    if eq <= 0:
+        return []
+    risk_held = {t: v for t, v in holdings.items() if t != SETTLEMENT and v > 0}
+    sells: list[tuple[str, str, float]] = []
+    kept = dict(risk_held)
+    for t in sorted(risk_held):
+        v = risk_held[t]
+        if t in exits:
+            sells.append((t, SETTLEMENT, round(v, 6)))
+            kept.pop(t)
+        elif v > cfg.hard_cap * eq:                       # trim a runaway back to the entry cap
+            cut = v - cfg.max_token * eq
+            if cut > cfg.min_swap:
+                sells.append((t, SETTLEMENT, round(cut, 6)))
+                kept[t] = cfg.max_token * eq
+    risk_on_value = sum(kept.values())
+    free_usdt = holdings.get(SETTLEMENT, 0.0) + sum(u for _, _, u in sells)
+    budget = min(free_usdt - cfg.stable_floor * eq, cfg.aggression * eq - risk_on_value)
+    buys: list[tuple[str, str, float]] = []
+    fresh = [t for t in picks if t not in kept]
+    slots = cfg.n_vehicles - len(kept)
+    if budget > cfg.min_swap and slots > 0 and fresh:
+        per = min(cfg.max_token * eq, budget / min(slots, len(fresh)))
+        for t in sorted(fresh, key=lambda t: -picks[t])[:slots]:
+            if per > cfg.min_swap:
+                buys.append((SETTLEMENT, t, round(per, 6)))
+    return sells + buys
+
+
+def project_weights(holdings: dict[str, float], plan: list[tuple[str, str, float]]) -> dict[str, float]:
+    """Resulting weights if `plan` fills — used to assert the post-trade book stays under the DQ line."""
+    eq = equity(holdings)
+    if eq <= 0:
+        return {SETTLEMENT: 1.0}
+    proj = dict(holdings)
+    for src, dst, usd in plan:
+        proj[src] = proj.get(src, 0.0) - usd
+        proj[dst] = proj.get(dst, 0.0) + usd
+    return {t: v / eq for t, v in proj.items() if v > 1e-9}

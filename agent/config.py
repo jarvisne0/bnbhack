@@ -38,15 +38,20 @@ def load_contracts() -> dict[str, str]:
 class Config:
     # --- HARD risk invariants (non-negotiable; protect the $24k) ---
     dd_stop: float = 0.25       # rotate ALL to USDT at >=25% drawdown (5% under the 30% DQ)
-    max_token: float = 0.25     # per-token cap: a full rug (-100%) => <=25% hit, under 30%
+    max_token: float = 0.25     # per-token entry cap: a full rug (-100%) => <=25% hit, under 30%
+    hard_cap: float = 0.28      # run-time ceiling: trim a winner back to max_token above this; <30% rug guard
     stable_floor: float = 0.20  # always hold >=20% USDT (dry powder + DD buffer)
     slip: float = 0.02          # abort a swap whose quoted slippage exceeds this
-    min_swap: float = 5.0       # skip dust trades (fees/churn)
+    min_swap: float = 2.0       # skip dust trades; low now that a round-trip is ~0.15%
+
+    # --- per-position stops (cheap round-trips make these affordable) ---
+    trail: float = 0.15         # exit a position that falls this far from its peak value
+    stop_loss: float = 0.12     # exit a position this far underwater from entry
 
     # --- behaviour (tunable with user) ---
     aggression: float = 0.60    # target risk-on fraction (capped at 1 - stable_floor)
     n_vehicles: int = 4         # spread convexity across this many names (never all-in one)
-    cadence_h: int = 4          # rebalance cadence; guarantees >=1 trade/day (comp needs 7/wk)
+    cadence_h: int = 2          # rebalance cadence; faster reaction now that trading is ~free
     cooldown_h: int = 12        # after a breaker trip, stay in USDT this long
 
     # --- per-token slippage overrides for thin memes ---
@@ -56,9 +61,10 @@ class Config:
 
     def __post_init__(self):
         assert 0 < self.dd_stop < 0.30, "dd_stop must sit under the 30% DQ line"
-        assert 0 < self.max_token <= 0.30, "a single token must not be able to breach 30%"
+        assert 0 < self.max_token <= self.hard_cap < 0.30, "no single token may reach the 30% rug line"
         assert 0 <= self.stable_floor < 1
         assert 0 <= self.aggression <= 1 - self.stable_floor, "aggression must leave the stable floor"
+        assert 0 < self.trail < 1 and 0 < self.stop_loss < 1
         assert self.n_vehicles >= 1
 
     def slip_for(self, token: str) -> float:

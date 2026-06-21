@@ -8,8 +8,9 @@ import unittest
 from pathlib import Path
 
 from .config import Config, SETTLEMENT
-from .risk import (breaker_tripped, drawdown, equity, rebalance_plan,
-                   target_weights, worst_case_drawdown)
+from .risk import (breaker_tripped, drawdown, dynamic_plan, equity, project_weights,
+                   rebalance_plan, stop_exits, target_weights, track_positions,
+                   worst_case_drawdown)
 from .selector import score, select
 from . import agent as agentmod
 
@@ -118,6 +119,58 @@ class TestRebalancePlan(unittest.TestCase):
         plan = rebalance_plan(holdings, {SETTLEMENT: 1.0}, CFG)
         self.assertTrue(all(d == SETTLEMENT for _, d, _ in plan))
         self.assertEqual({s for s, _, _ in plan}, {"SKYAI", "TAG"})
+
+
+class TestStops(unittest.TestCase):
+    def test_track_records_entry_and_ratchets_peak(self):
+        peaks, entries = track_positions({"SKYAI": 100.0}, {}, {})
+        self.assertEqual((peaks, entries), ({"SKYAI": 100.0}, {"SKYAI": 100.0}))
+        peaks, entries = track_positions({"SKYAI": 130.0}, peaks, entries)
+        self.assertEqual(peaks["SKYAI"], 130.0)        # peak ratchets up
+        self.assertEqual(entries["SKYAI"], 100.0)      # entry stays
+        peaks, entries = track_positions({"SKYAI": 110.0}, peaks, entries)
+        self.assertEqual(peaks["SKYAI"], 130.0)        # peak does not fall back
+
+    def test_track_drops_closed_positions(self):
+        peaks, entries = track_positions({}, {"SKYAI": 100.0}, {"SKYAI": 100.0})
+        self.assertEqual((peaks, entries), ({}, {}))
+
+    def test_trailing_stop_fires(self):
+        exits = stop_exits({"SKYAI": 85.0}, {"SKYAI": 100.0}, {"SKYAI": 100.0}, CFG)
+        self.assertEqual(exits, {"SKYAI"})             # 15% off the peak
+
+    def test_stop_loss_fires(self):
+        exits = stop_exits({"SKYAI": 87.0}, {"SKYAI": 100.0}, {"SKYAI": 100.0}, CFG)
+        self.assertEqual(exits, {"SKYAI"})             # 13% underwater from entry (> 12% stop)
+
+    def test_winner_runs_no_exit(self):
+        # up 20%, pulled back only to 110 from a 120 peak: inside both bands -> hold
+        exits = stop_exits({"SKYAI": 110.0}, {"SKYAI": 120.0}, {"SKYAI": 100.0}, CFG)
+        self.assertEqual(exits, set())
+
+    def test_dynamic_sells_stopped_position(self):
+        plan = dynamic_plan({"SKYAI": 250.0, SETTLEMENT: 750.0}, {}, {"SKYAI"}, CFG)
+        self.assertIn(("SKYAI", SETTLEMENT, 250.0), plan)
+
+    def test_dynamic_trims_runaway_above_hard_cap(self):
+        h = {"SKYAI": 400.0, SETTLEMENT: 600.0}        # 40% of a $1000 book, above the 28% ceiling
+        plan = dynamic_plan(h, {}, set(), CFG)
+        sells = [p for p in plan if p[0] == "SKYAI"]
+        self.assertEqual(len(sells), 1)
+        self.assertAlmostEqual(sells[0][2], 150.0)     # trimmed back to max_token (25% = $250)
+        self.assertLess(worst_case_drawdown(project_weights(h, plan)), 0.30)
+
+    def test_dynamic_lets_winner_run_below_hard_cap(self):
+        # 27% < 28% ceiling: a winner between the entry cap and the ceiling is NOT trimmed
+        h = {"SKYAI": 270.0, SETTLEMENT: 730.0}
+        plan = dynamic_plan(h, {}, set(), CFG)
+        self.assertEqual([p for p in plan if p[0] == "SKYAI"], [])
+
+    def test_dynamic_deploys_into_fresh_picks_capped(self):
+        plan = dynamic_plan({SETTLEMENT: 1000.0}, {"TAG": 1.0, "SIREN": 0.8}, set(), CFG)
+        self.assertTrue(plan and all(s == SETTLEMENT for s, _, _ in plan))   # all buys
+        self.assertTrue(all(usd <= CFG.max_token * 1000 + 1e-6 for _, _, usd in plan))
+        self.assertLess(worst_case_drawdown(project_weights({SETTLEMENT: 1000.0}, plan)), 0.30)
 
 
 class TestSelector(unittest.TestCase):

@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .config import Config, HIGHVOL, SETTLEMENT, load_contracts
-from .risk import (breaker_tripped, drawdown, equity, rebalance_plan,
-                   target_weights, worst_case_drawdown)
+from .risk import (breaker_tripped, drawdown, dynamic_plan, equity, project_weights,
+                   rebalance_plan, stop_exits, track_positions, worst_case_drawdown)
 from .selector import select
 from .signals import gather
 from .twakcli import Twak, TwakError
@@ -28,6 +28,8 @@ class State:
     hwm: float = 0.0
     cooldown_until: float = 0.0
     last_trade_ts: float = 0.0
+    peaks: dict = field(default_factory=dict)     # per-token running peak value (trailing stop)
+    entries: dict = field(default_factory=dict)   # per-token entry value (stop-loss)
 
     @classmethod
     def load(cls, path: Path = STATE_PATH) -> "State":
@@ -44,20 +46,16 @@ def resolve(token: str, contracts: dict[str, str]) -> str:
     return contracts.get(token, token)
 
 
-def decide_target(tw: Twak, cfg: Config, contracts: dict[str, str],
-                  cmc: dict[str, dict] | None) -> tuple[dict[str, float], str]:
-    """Select vehicles passing the sellability gate and size them convexly."""
+def select_picks(tw: Twak, cfg: Config, contracts: dict[str, str],
+                 cmc: dict[str, dict] | None) -> dict[str, float]:
+    """CMC + momentum picks among HIGHVOL names that pass the two-way sellability gate."""
     cands = {t: contracts[t] for t in HIGHVOL if t in contracts}
     risk_ok = {}
     for t, c in cands.items():
         sellable = tw.sellable(c, slippage=cfg.slip_for(t))
         soft = tw.risk_clean(f"{tw.chain}:{c}")  # None when API unavailable -> ignore
         risk_ok[t] = sellable and (soft is not False)
-    sigs = gather(tw, cands, cmc)
-    picks = select(sigs, risk_ok, cfg)
-    if not picks:
-        return {SETTLEMENT: 1.0}, "no vehicle passed risk/selection -> all USDT"
-    return target_weights(picks, cfg), f"rebalance into {sorted(picks)}"
+    return select(gather(tw, cands, cmc), risk_ok, cfg)
 
 
 def run_once(tw: Twak, cfg: Config, *, contracts: dict[str, str] | None = None,
@@ -75,18 +73,32 @@ def run_once(tw: Twak, cfg: Config, *, contracts: dict[str, str] | None = None,
 
     st.hwm = max(st.hwm, eq)
     dd = drawdown(eq, st.hwm)
+    held = {t: v for t, v in holdings.items() if t != SETTLEMENT and v > 0}
+    st.peaks, st.entries = track_positions(held, st.peaks, st.entries)
 
+    exits: set[str] = set()
     if breaker_tripped(eq, st.hwm, cfg):
-        target, reason = {SETTLEMENT: 1.0}, f"DD BREAKER {dd:.1%} >= {cfg.dd_stop:.0%}"
+        plan = rebalance_plan(holdings, {SETTLEMENT: 1.0}, cfg)
+        reason = f"DD BREAKER {dd:.1%} >= {cfg.dd_stop:.0%}"
         st.cooldown_until = now + cfg.cooldown_h * 3600
+        st.peaks, st.entries = {}, {}
     elif now < st.cooldown_until:
-        target, reason = {SETTLEMENT: 1.0}, f"cooldown ({(st.cooldown_until - now) / 3600:.1f}h left)"
+        plan = rebalance_plan(holdings, {SETTLEMENT: 1.0}, cfg)
+        reason = f"cooldown ({(st.cooldown_until - now) / 3600:.1f}h left)"
+        st.peaks, st.entries = {}, {}
     else:
-        target, reason = decide_target(tw, cfg, contracts, cmc)
+        exits = stop_exits(held, st.peaks, st.entries, cfg)
+        picks = select_picks(tw, cfg, contracts, cmc)
+        plan = dynamic_plan(holdings, picks, exits, cfg)
+        stopped = f", stopped {sorted(exits)}" if exits else ""
+        reason = (f"hold/deploy: picks {sorted(picks)}{stopped}" if (picks or exits)
+                  else "no vehicle passed risk/selection")
+        for t in exits:                                  # closed positions drop their stop state
+            st.peaks.pop(t, None); st.entries.pop(t, None)
 
-    assert worst_case_drawdown(target) < 0.30, "target violates the 30% single-rug guard"
+    target = project_weights(holdings, plan)
+    assert worst_case_drawdown(target) < 0.30, "post-trade book violates the 30% single-rug guard"
 
-    plan = rebalance_plan(holdings, target, cfg)
     swaps = []
     for src, dst, usd in plan:
         risk_tok = dst if src == SETTLEMENT else src

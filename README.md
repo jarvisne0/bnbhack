@@ -19,18 +19,25 @@ structurally hard to hit while keeping convex upside exposure.
 
 ## The loop (deterministic, every 4 hours)
 
-1. **Read** the live portfolio via twak → equity, high-water mark, drawdown.
+1. **Read** the live portfolio via twak → equity, high-water mark, drawdown, per-position peak/entry.
 2. **Kill-switch** — if drawdown ≥ **25%** (a 5% margin under the 30% DQ line, for
    slippage/latency), rotate everything to USDT and enter cooldown. Non-negotiable.
-3. **Select** 3–4 "heating" high-volatility vehicles, ranked by **CMC** signal
+3. **Per-position stops** — exit any name that has fallen **15% from its peak** (trailing) or sits
+   **12% underwater from entry** (stop-loss). Round-trips cost ~0.15%, so cutting losers fast is
+   nearly free — this is what keeps one dumping vehicle from dragging the book toward the DQ line.
+4. **Select** 3–4 "heating" high-volatility vehicles, ranked by **CMC** signal
    (24h volume-change / trending heat) + short-horizon momentum, intersected with the
-   eligible-token list and a sellability gate.
-4. **Size convexly** — a hard **25% per-token cap** and a **20% USDT floor**, so no single
-   position can exceed 25%. Even a 100% rug of one vehicle is a ≤25% portfolio hit —
-   structurally under the DQ line. The remainder sits in USDT (dry powder + DQ buffer).
-5. **Rebalance** via `twak swap --chain bsc`. Every quote is slippage-checked (abort > 2%);
+   eligible-token list and a two-way sellability gate.
+5. **Size convexly, let winners run** — new positions are capped at **25%** of the book (a 100% rug
+   is then a ≤25% hit, under the DQ line); winners are *not* trimmed back to entry but ride until a
+   stop, only being trimmed if they breach a **28%** ceiling (still rug-safe under 30%). A **20% USDT
+   floor** is always held as dry powder + DQ buffer; freed capital redeploys into fresh leaders.
+6. **Rebalance** via `twak swap --chain bsc`. Every quote is slippage-checked (abort > 2%);
    every buy is gated by a **two-way quote round-trip** — the token must quote a sell back to
    USDT, which proves on-chain sellability (our honeypot filter, stronger than a backend opinion).
+
+The agent re-evaluates every **2 hours** (cheap trading makes fast reaction affordable) and is
+designed to be improved live across the week without changing wallets.
 
 State (high-water mark, cooldown) persists across restarts, so the breaker survives a crash.
 A dry-run guard (`--quote-only`) runs the whole loop with zero real transactions.
