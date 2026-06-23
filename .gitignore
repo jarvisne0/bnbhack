@@ -7,3 +7,7 @@ agent/state.json
 .env*
 rust/target/
 rust/state.json
+rust/logs/
+logs/
+wallet_pw
+*.log

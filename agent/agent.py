@@ -73,7 +73,7 @@ def run_once(tw: Twak, cfg: Config, *, contracts: dict[str, str] | None = None,
 
     st.hwm = max(st.hwm, eq)
     dd = drawdown(eq, st.hwm)
-    held = {t: v for t, v in holdings.items() if t != SETTLEMENT and v > 0}
+    held = {t: v for t, v in holdings.items() if t in HIGHVOL and v >= cfg.min_swap}
     st.peaks, st.entries = track_positions(held, st.peaks, st.entries)
 
     exits: set[str] = set()

@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::config::{Config, SETTLEMENT};
+use crate::config::{Config, HIGHVOL, SETTLEMENT};
 
 pub type Book = BTreeMap<String, f64>;
 
@@ -56,11 +56,13 @@ pub fn worst_case_drawdown(target: &Book) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// Risk holdings only (non-settlement, positive value).
-pub fn risk_held(holdings: &Book) -> Book {
+/// Tradeable risk positions: meme-universe holdings above the minimum tradeable size. Excludes the
+/// settlement stable, the BNB gas reserve, and sub-min_swap dust — none of which the engine should
+/// stop, trim, or count as an occupied vehicle (selling gas or chasing dust both break live operation).
+pub fn risk_held(holdings: &Book, cfg: &Config) -> Book {
     holdings
         .iter()
-        .filter(|(t, v)| t.as_str() != SETTLEMENT && **v > 0.0)
+        .filter(|(t, v)| HIGHVOL.contains(&t.as_str()) && **v >= cfg.min_swap)
         .map(|(t, v)| (t.clone(), *v))
         .collect()
 }
@@ -102,8 +104,8 @@ pub fn rebalance_plan(holdings: &Book, target: &Book, cfg: &Config) -> Vec<Swap>
     keys.extend(target.keys());
     let (mut sells, mut buys) = (vec![], vec![]);
     for t in keys {
-        if t == SETTLEMENT {
-            continue;
+        if !HIGHVOL.contains(&t.as_str()) {
+            continue; // only meme positions rotate; settlement is the cash leg, BNB is gas
         }
         let desired = target.get(t).copied().unwrap_or(0.0) * eq;
         let d = desired - holdings.get(t).copied().unwrap_or(0.0);
@@ -125,7 +127,7 @@ pub fn dynamic_plan(holdings: &Book, picks: &Book, exits: &BTreeSet<String>, cfg
     if eq <= 0.0 {
         return vec![];
     }
-    let held = risk_held(holdings);
+    let held = risk_held(holdings, cfg);
     let mut sells = vec![];
     let mut kept = held.clone();
     for (t, v) in &held {
@@ -214,9 +216,9 @@ mod tests {
     #[test]
     fn single_rug_keeps_dd_under_30() {
         // worst case from dynamic deploy: no single position can exceed the entry cap
-        let plan = dynamic_plan(&book(&[("USDT", 1000.0)]),
+        let plan = dynamic_plan(&book(&[(SETTLEMENT,1000.0)]),
             &book(&[("A", 1.0), ("B", 1.0), ("C", 1.0), ("D", 1.0)]), &BTreeSet::new(), &cfg());
-        let w = project_weights(&book(&[("USDT", 1000.0)]), &plan);
+        let w = project_weights(&book(&[(SETTLEMENT,1000.0)]), &plan);
         assert!(worst_case_drawdown(&w) < 0.30);
     }
 
@@ -226,9 +228,9 @@ mod tests {
     }
 
     #[test]
-    fn rebalance_sells_before_buys_and_routes_usdt() {
-        let plan = rebalance_plan(&book(&[("SKYAI", 500.0), ("USDT", 500.0)]),
-            &book(&[("TAG", 0.5), ("USDT", 0.5)]), &cfg());
+    fn rebalance_sells_before_buys_and_routes_settlement() {
+        let plan = rebalance_plan(&book(&[("SKYAI", 500.0), (SETTLEMENT, 500.0)]),
+            &book(&[("TAG", 0.5), (SETTLEMENT, 0.5)]), &cfg());
         let kinds: Vec<bool> = plan.iter().map(|s| s.src == SETTLEMENT).collect();
         let mut sorted = kinds.clone();
         sorted.sort();
@@ -238,8 +240,8 @@ mod tests {
 
     #[test]
     fn rebalance_full_rotation() {
-        let plan = rebalance_plan(&book(&[("SKYAI", 250.0), ("TAG", 250.0), ("USDT", 500.0)]),
-            &book(&[("USDT", 1.0)]), &cfg());
+        let plan = rebalance_plan(&book(&[("SKYAI", 250.0), ("TAG", 250.0), (SETTLEMENT,500.0)]),
+            &book(&[(SETTLEMENT,1.0)]), &cfg());
         assert!(plan.iter().all(|s| s.dst == SETTLEMENT));
         let srcs: BTreeSet<&str> = plan.iter().map(|s| s.src.as_str()).collect();
         assert_eq!(srcs, BTreeSet::from(["SKYAI", "TAG"]));
@@ -280,24 +282,24 @@ mod tests {
 
     #[test]
     fn dynamic_sells_stopped() {
-        let plan = dynamic_plan(&book(&[("SKYAI", 250.0), ("USDT", 750.0)]),
+        let plan = dynamic_plan(&book(&[("SKYAI", 250.0), (SETTLEMENT,750.0)]),
             &Book::new(), &BTreeSet::from(["SKYAI".to_string()]), &cfg());
         assert!(plan.iter().any(|s| s.src == "SKYAI" && (s.usd - 250.0).abs() < 1e-6));
     }
 
     #[test]
     fn dynamic_trims_runaway() {
-        let h = book(&[("SKYAI", 400.0), ("USDT", 600.0)]); // 40% of $1000, above 28% ceiling
+        let h = book(&[("SKYAI", 400.0), (SETTLEMENT,600.0)]); // 40% of $1000, above 28% ceiling
         let plan = dynamic_plan(&h, &Book::new(), &BTreeSet::new(), &cfg());
         let sells: Vec<&Swap> = plan.iter().filter(|s| s.src == "SKYAI").collect();
         assert_eq!(sells.len(), 1);
-        assert!((sells[0].usd - 150.0).abs() < 1e-6); // trimmed back to max_token ($250)
+        assert!((sells[0].usd - 130.0).abs() < 1e-6); // trimmed back to max_token (27% = $270)
         assert!(worst_case_drawdown(&project_weights(&h, &plan)) < 0.30);
     }
 
     #[test]
     fn dynamic_lets_winner_run_below_hard_cap() {
-        let h = book(&[("SKYAI", 270.0), ("USDT", 730.0)]); // 27% < 28% ceiling
+        let h = book(&[("SKYAI", 270.0), (SETTLEMENT,730.0)]); // 27% < 28% ceiling
         let plan = dynamic_plan(&h, &Book::new(), &BTreeSet::new(), &cfg());
         assert!(!has_sell(&plan, "SKYAI"));
     }
@@ -305,9 +307,9 @@ mod tests {
     #[test]
     fn dynamic_deploys_capped() {
         let c = cfg();
-        let plan = dynamic_plan(&book(&[("USDT", 1000.0)]), &book(&[("TAG", 1.0), ("SIREN", 0.8)]), &BTreeSet::new(), &c);
+        let plan = dynamic_plan(&book(&[(SETTLEMENT,1000.0)]), &book(&[("TAG", 1.0), ("SIREN", 0.8)]), &BTreeSet::new(), &c);
         assert!(!plan.is_empty() && plan.iter().all(|s| s.src == SETTLEMENT));
         assert!(plan.iter().all(|s| s.usd <= c.max_token * 1000.0 + 1e-6));
-        assert!(worst_case_drawdown(&project_weights(&book(&[("USDT", 1000.0)]), &plan)) < 0.30);
+        assert!(worst_case_drawdown(&project_weights(&book(&[(SETTLEMENT,1000.0)]), &plan)) < 0.30);
     }
 }

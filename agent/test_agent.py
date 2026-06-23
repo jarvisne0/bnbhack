@@ -157,7 +157,7 @@ class TestStops(unittest.TestCase):
         plan = dynamic_plan(h, {}, set(), CFG)
         sells = [p for p in plan if p[0] == "SKYAI"]
         self.assertEqual(len(sells), 1)
-        self.assertAlmostEqual(sells[0][2], 150.0)     # trimmed back to max_token (25% = $250)
+        self.assertAlmostEqual(sells[0][2], 130.0)     # trimmed back to max_token (27% = $270)
         self.assertLess(worst_case_drawdown(project_weights(h, plan)), 0.30)
 
     def test_dynamic_lets_winner_run_below_hard_cap(self):

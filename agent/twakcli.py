@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 import subprocess
 
+from .config import SETTLEMENT
+
 
 class TwakError(RuntimeError):
     pass
@@ -27,34 +29,29 @@ class Twak:
         self.quote_only = quote_only  # global dry-run guard: True => never executes a tx
         self.timeout = timeout
 
-    def _run(self, args: list[str]) -> dict:
+    def _run(self, args: list[str]) -> dict | list:
         proc = subprocess.run(self.base + args, capture_output=True, text=True,
                               timeout=self.timeout)
         out = proc.stdout
-        i = out.find("{")
-        if i < 0:
+        starts = [p for p in (out.find("{"), out.find("[")) if p >= 0]
+        if not starts:
             raise TwakError(f"no JSON in `{' '.join(args)}`: {out.strip()[:200]} "
                             f"{proc.stderr.strip()[:200]}")
+        i = min(starts)
         try:
             return json.loads(out[i:])
         except json.JSONDecodeError as e:
             raise TwakError(f"bad JSON in `{' '.join(args)}`: {e}: {out[i:][:200]}")
 
     # --- reads ---
-    def balance(self) -> dict:
-        """Raw BSC balance: native + tokens with USD values."""
-        return self._run(["wallet", "balance", "--chain", self.chain, "--json"])
-
     def holdings(self) -> dict[str, float]:
-        """{symbol: usd} on BSC. Native first, then each token, dropping zero values."""
-        b = self.balance()
+        """{symbol: usd} on BSC. `portfolio` prices every asset (native + each token); `balance`
+        only prices the native leg, so a USDC-funded wallet would read as empty."""
+        items = self._run(["wallet", "portfolio", "--chains", self.chain, "--json"])
         h: dict[str, float] = {}
-        nat = float(b.get("totalUsd") or 0)
-        if nat > 0:
-            h[b.get("symbol", "BNB")] = nat
-        for t in b.get("tokens", []) or []:
-            sym = t.get("symbol") or t.get("ticker")
-            usd = t.get("usd") or t.get("usdValue") or t.get("totalUsd") or t.get("value")
+        for it in items or []:
+            sym = it.get("symbol") or it.get("ticker")
+            usd = it.get("usdValue")
             if sym and usd:
                 h[sym] = h.get(sym, 0.0) + float(usd)
         return h
@@ -71,9 +68,9 @@ class Twak:
         ])
 
     def sellable(self, contract: str, usd: float = 25.0, slippage: float = 0.05) -> bool:
-        """Honeypot/liquidity gate: a token must quote a SELL back to USDT to be tradeable."""
+        """Honeypot/liquidity gate: a token must quote a SELL back to the settlement stable to be tradeable."""
         try:
-            q = self.quote(contract, "USDT", usd, slippage)
+            q = self.quote(contract, SETTLEMENT, usd, slippage)
         except TwakError:
             return False
         return bool(q.get("output")) and float(q.get("priceImpact", 0) or 0) < slippage * 100

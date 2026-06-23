@@ -13,14 +13,14 @@ from pathlib import Path
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 
-# Stables we treat as the safe leg. USDT is the settlement asset (resolves by symbol in twak).
+# Stables we treat as the safe leg. USDC is the settlement asset (resolves by symbol in twak).
 STABLES = ("USDT", "USDC")
 # Liquid ballast — lower variance than memes, still eligible BEP-20.
 MAJORS = ("BNB", "ETH")
 # Tradeable BSC-only high-variance vehicles (vol > $500k/24h, see data/meme_pools.csv).
 HIGHVOL = ("SKYAI", "BANANAS31", "TAG", "SIREN", "MYX", "DEXE")
 
-SETTLEMENT = "USDT"
+SETTLEMENT = "USDC"  # the wallet is funded in USDC; the settlement leg must match what's held
 
 # Pinned CMC ids for the meme universe (resolve by id, not symbol — TAG/SIREN tickers collide).
 CMC_IDS = {
@@ -38,11 +38,11 @@ def load_contracts() -> dict[str, str]:
 class Config:
     # --- HARD risk invariants (non-negotiable; protect the $24k) ---
     dd_stop: float = 0.25       # rotate ALL to USDT at >=25% drawdown (5% under the 30% DQ)
-    max_token: float = 0.25     # per-token entry cap: a full rug (-100%) => <=25% hit, under 30%
+    max_token: float = 0.27     # per-token entry cap: a full rug (-100%) => <=27% hit, under 30%; clears $1 at ~$4 bankroll
     hard_cap: float = 0.28      # run-time ceiling: trim a winner back to max_token above this; <30% rug guard
     stable_floor: float = 0.20  # always hold >=20% USDT (dry powder + DD buffer)
     slip: float = 0.02          # abort a swap whose quoted slippage exceeds this
-    min_swap: float = 2.0       # skip dust trades; low now that a round-trip is ~0.15%
+    min_swap: float = 1.0       # hackathon rule: every trade must be >= $1 to count
 
     # --- per-position stops (cheap round-trips make these affordable) ---
     trail: float = 0.15         # exit a position that falls this far from its peak value
@@ -50,7 +50,7 @@ class Config:
 
     # --- behaviour (tunable with user) ---
     aggression: float = 0.60    # target risk-on fraction (capped at 1 - stable_floor)
-    n_vehicles: int = 4         # spread convexity across this many names (never all-in one)
+    n_vehicles: int = 2         # spread convexity across this many names; 2 keeps each >= $1 on a ~$4 bankroll
     cadence_h: int = 2          # rebalance cadence; faster reaction now that trading is ~free
     cooldown_h: int = 12        # after a breaker trip, stay in USDT this long
 

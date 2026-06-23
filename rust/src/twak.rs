@@ -9,7 +9,10 @@ use std::process::Command;
 
 use serde::Deserialize;
 
+use crate::config::SETTLEMENT;
 use crate::risk::Book;
+
+const BSC_RPC: &str = "https://bsc-dataseed.binance.org";
 
 pub struct Twak {
     pub chain: String,
@@ -29,20 +32,11 @@ impl std::fmt::Display for TwakError {
 type R<T> = Result<T, TwakError>;
 
 #[derive(Deserialize)]
-struct TokenBalance {
+struct PortfolioItem {
     #[serde(alias = "ticker")]
     symbol: Option<String>,
-    #[serde(alias = "usdValue", alias = "totalUsd", alias = "value")]
-    usd: Option<f64>,
-}
-
-#[derive(Deserialize)]
-struct Balance {
-    symbol: Option<String>,
-    #[serde(rename = "totalUsd")]
-    total_usd: Option<f64>,
-    #[serde(default)]
-    tokens: Vec<TokenBalance>,
+    #[serde(rename = "usdValue")]
+    usd_value: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -85,7 +79,7 @@ impl Twak {
         Twak {
             chain: chain.to_string(),
             quote_only: true,
-            sim: Some(BTreeMap::from([("USDT".to_string(), equity)])),
+            sim: Some(BTreeMap::from([(SETTLEMENT.to_string(), equity)])),
         }
     }
 
@@ -95,7 +89,7 @@ impl Twak {
             .output()
             .map_err(|e| TwakError(format!("twak spawn failed: {e}")))?;
         let text = String::from_utf8_lossy(&out.stdout);
-        let i = text.find('{').ok_or_else(|| {
+        let i = text.find(|c: char| c == '{' || c == '[').ok_or_else(|| {
             TwakError(format!("no JSON in `{}`: {}", args.join(" "), text.trim().chars().take(160).collect::<String>()))
         })?;
         serde_json::from_str(&text[i..])
@@ -107,15 +101,14 @@ impl Twak {
         if let Some(s) = &self.sim {
             return Ok(s.clone());
         }
-        let v = self.run(&["wallet", "balance", "--chain", &self.chain, "--json"])?;
-        let b: Balance = serde_json::from_value(v).map_err(|e| TwakError(format!("balance shape: {e}")))?;
+        // `portfolio` prices every asset (native + each token); `balance` only prices the native leg,
+        // so a USDC-funded wallet would read as empty. The risk engine is USD-denominated.
+        let v = self.run(&["wallet", "portfolio", "--chains", &self.chain, "--json"])?;
+        let items: Vec<PortfolioItem> =
+            serde_json::from_value(v).map_err(|e| TwakError(format!("portfolio shape: {e}")))?;
         let mut h = Book::new();
-        let nat = b.total_usd.unwrap_or(0.0);
-        if nat > 0.0 {
-            h.insert(b.symbol.unwrap_or_else(|| "BNB".to_string()), nat);
-        }
-        for t in b.tokens {
-            if let (Some(sym), Some(usd)) = (t.symbol, t.usd) {
+        for it in items {
+            if let (Some(sym), Some(usd)) = (it.symbol, it.usd_value) {
                 if usd != 0.0 {
                     *h.entry(sym).or_insert(0.0) += usd;
                 }
@@ -136,6 +129,36 @@ impl Twak {
         Some(now / first - 1.0)
     }
 
+    /// BSC wallet address for this chain (decrypts the wallet — needs the password in env).
+    pub fn address(&self) -> Option<String> {
+        let v = self.run(&["wallet", "address", "--chain", &self.chain, "--json"]).ok()?;
+        v.get("address")?.as_str().map(str::to_string)
+    }
+
+    /// Current spot price in USD for a token, via twak's price feed.
+    pub fn spot_usd(&self, contract: &str) -> Option<f64> {
+        let v = self.run(&["price", contract, "--chain", &self.chain, "--history", "day", "--json"]).ok()?;
+        let ph: PriceHistory = serde_json::from_value(v).ok()?;
+        ph.price_usd.as_ref().and_then(as_f64)
+    }
+
+    /// Raw BEP-20 `balanceOf` in token units (assumes 18 decimals — true for the meme universe),
+    /// read from a public BSC RPC. twak's portfolio lists only whitelisted tokens, so a held meme is
+    /// invisible to it; this lets the risk engine value its own positions.
+    pub fn token_balance(&self, contract: &str, holder: &str) -> Option<f64> {
+        let data = format!("0x70a08231000000000000000000000000{}", holder.trim_start_matches("0x"));
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{{"to":"{contract}","data":"{data}"}},"latest"]}}"#
+        );
+        let out = Command::new("curl")
+            .args(["-s", "--max-time", "15", "-X", "POST", BSC_RPC,
+                   "-H", "Content-Type: application/json", "--data", &body])
+            .output().ok()?;
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+        let hex = v.get("result")?.as_str()?.trim_start_matches("0x");
+        Some(u128::from_str_radix(hex, 16).ok()? as f64 / 1e18)
+    }
+
     pub fn quote(&self, src: &str, dst: &str, usd: f64, slippage: f64) -> R<Quote> {
         let usd_s = format!("{usd:.6}");
         let slip_s = format!("{:.4}", slippage * 100.0);
@@ -146,9 +169,9 @@ impl Twak {
         serde_json::from_value(v).map_err(|e| TwakError(format!("quote shape: {e}")))
     }
 
-    /// Honeypot/liquidity gate: a token must quote a SELL back to USDT to be tradeable.
+    /// Honeypot/liquidity gate: a token must quote a SELL back to the settlement stable to be tradeable.
     pub fn sellable(&self, contract: &str, slippage: f64) -> bool {
-        match self.quote(contract, "USDT", 25.0, slippage) {
+        match self.quote(contract, SETTLEMENT, 25.0, slippage) {
             Ok(q) => q.output.is_some() && impact_pct(&q) < slippage * 100.0,
             Err(_) => false,
         }

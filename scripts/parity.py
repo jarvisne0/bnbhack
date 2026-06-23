@@ -32,13 +32,13 @@ sigs = {
 risk_ok = {t: True for t in sigs}
 picks = select(sigs, risk_ok, cfg)
 
-b_h = {"USDT": 1000.0}
+b_h = {SETTLEMENT: 1000.0}
 b = dynamic_plan(b_h, picks, set(), cfg)
-c_h = {"SKYAI": 400.0, "TAG": 150.0, "USDT": 450.0}
+c_h = {"SKYAI": 400.0, "TAG": 150.0, SETTLEMENT: 450.0}
 c = dynamic_plan(c_h, picks, set(), cfg)
-d_h = {"SKYAI": 200.0, "TAG": 200.0, "USDT": 600.0}
+d_h = {"SKYAI": 200.0, "TAG": 200.0, SETTLEMENT: 600.0}
 d = dynamic_plan(d_h, picks, {"TAG"}, cfg)
-e = rebalance_plan({"SKYAI": 250.0, "TAG": 250.0, "USDT": 500.0}, {SETTLEMENT: 1.0}, cfg)
+e = rebalance_plan({"SKYAI": 250.0, "TAG": 250.0, SETTLEMENT: 500.0}, {SETTLEMENT: 1.0}, cfg)
 
 print(json.dumps({
     "A_select": fmt_book(picks),

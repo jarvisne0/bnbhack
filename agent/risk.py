@@ -6,7 +6,7 @@ concentration-capped convex target weights that no single rug can push past the 
 """
 from __future__ import annotations
 
-from .config import Config, SETTLEMENT
+from .config import Config, HIGHVOL, SETTLEMENT
 
 
 def equity(holdings: dict[str, float]) -> float:
@@ -60,8 +60,8 @@ def rebalance_plan(holdings: dict[str, float], target: dict[str, float],
     deltas = {t: desired.get(t, 0.0) - holdings.get(t, 0.0) for t in desired}
     sells, buys = [], []
     for t in sorted(deltas):
-        if t == SETTLEMENT:
-            continue
+        if t not in HIGHVOL:
+            continue  # only meme positions rotate; settlement is the cash leg, BNB is gas
         d = deltas[t]
         if d < -cfg.min_swap:
             sells.append((t, SETTLEMENT, round(-d, 6)))
@@ -111,7 +111,7 @@ def dynamic_plan(holdings: dict[str, float], picks: dict[str, float], exits: set
     eq = equity(holdings)
     if eq <= 0:
         return []
-    risk_held = {t: v for t, v in holdings.items() if t != SETTLEMENT and v > 0}
+    risk_held = {t: v for t, v in holdings.items() if t in HIGHVOL and v >= cfg.min_swap}
     sells: list[tuple[str, str, float]] = []
     kept = dict(risk_held)
     for t in sorted(risk_held):

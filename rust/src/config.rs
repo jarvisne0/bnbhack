@@ -5,7 +5,12 @@
 use std::collections::BTreeMap;
 use std::fs;
 
-pub const SETTLEMENT: &str = "USDT";
+pub const SETTLEMENT: &str = "USDC"; // wallet is funded in USDC; settlement leg must match holdings
+
+/// The agent wallet pays its own BSC gas in native BNB; warn before the tank runs dry (every swap
+/// silently halts otherwise). Address is the registered competition wallet — must match DoraHacks.
+pub const GAS_WALLET: &str = "0x661Cd0cF6F9b1d57845EaC9E82E71Ea11356edD9";
+pub const GAS_MIN_USD: f64 = 2.0;
 
 /// BSC-only high-variance vehicles (vol > $500k/24h). Selection is restricted to these.
 pub const HIGHVOL: [&str; 6] = ["SKYAI", "BANANAS31", "TAG", "SIREN", "MYX", "DEXE"];
@@ -45,9 +50,9 @@ impl Default for Config {
             slip_overrides.insert(t.to_string(), 0.04);
         }
         let cfg = Config {
-            dd_stop: 0.25, max_token: 0.25, hard_cap: 0.28, stable_floor: 0.20,
-            slip: 0.02, min_swap: 2.0, trail: 0.15, stop_loss: 0.12,
-            aggression: 0.60, n_vehicles: 4, cooldown_h: 12.0, slip_overrides,
+            dd_stop: 0.25, max_token: 0.27, hard_cap: 0.28, stable_floor: 0.20,
+            slip: 0.02, min_swap: 1.0, trail: 0.15, stop_loss: 0.12,
+            aggression: 0.60, n_vehicles: 2, cooldown_h: 12.0, slip_overrides,
         };
         cfg.check();
         cfg

@@ -10,6 +10,7 @@
 
 mod cmc;
 mod config;
+mod monitor;
 mod risk;
 mod selector;
 mod signals;
@@ -34,16 +35,18 @@ struct Args {
     password: Option<String>,
     sim_equity: Option<f64>,
     no_cmc: bool,
+    log_only: bool,
     chain: String,
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { live: false, password: None, sim_equity: None, no_cmc: false, chain: "bsc".into() };
+    let mut a = Args { live: false, password: None, sim_equity: None, no_cmc: false, log_only: false, chain: "bsc".into() };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--live" => a.live = true,
             "--no-cmc" => a.no_cmc = true,
+            "--log-only" => a.log_only = true,
             "--password" => a.password = it.next(),
             "--sim-equity" => a.sim_equity = it.next().and_then(|v| v.parse().ok()),
             "--chain" => a.chain = it.next().unwrap_or_else(|| "bsc".into()),
@@ -107,17 +110,17 @@ fn parity_dump() -> serde_json::Value {
     let picks = select(&sigs, &risk_ok, &cfg);
 
     // B: fresh deploy  C: trim runaway  D: stop a loser then redeploy  E: full rotation
-    let b = dynamic_plan(&book(&[("USDT", 1000.0)]), &picks, &BTreeSet::new(), &cfg);
-    let c_h = book(&[("SKYAI", 400.0), ("TAG", 150.0), ("USDT", 450.0)]);
+    let b = dynamic_plan(&book(&[(SETTLEMENT,1000.0)]), &picks, &BTreeSet::new(), &cfg);
+    let c_h = book(&[("SKYAI", 400.0), ("TAG", 150.0), (SETTLEMENT,450.0)]);
     let c = dynamic_plan(&c_h, &picks, &BTreeSet::new(), &cfg);
-    let d_h = book(&[("SKYAI", 200.0), ("TAG", 200.0), ("USDT", 600.0)]);
+    let d_h = book(&[("SKYAI", 200.0), ("TAG", 200.0), (SETTLEMENT,600.0)]);
     let d = dynamic_plan(&d_h, &picks, &BTreeSet::from(["TAG".to_string()]), &cfg);
-    let e = rebalance_plan(&book(&[("SKYAI", 250.0), ("TAG", 250.0), ("USDT", 500.0)]), &BTreeMap::from([(SETTLEMENT.to_string(), 1.0)]), &cfg);
+    let e = rebalance_plan(&book(&[("SKYAI", 250.0), ("TAG", 250.0), (SETTLEMENT,500.0)]), &BTreeMap::from([(SETTLEMENT.to_string(), 1.0)]), &cfg);
 
     serde_json::json!({
         "A_select": fmt_book(&picks),
         "B_deploy": fmt_plan(&b),
-        "B_weights": fmt_book(&project_weights(&book(&[("USDT", 1000.0)]), &b)),
+        "B_weights": fmt_book(&project_weights(&book(&[(SETTLEMENT,1000.0)]), &b)),
         "C_trim": fmt_plan(&c),
         "C_weights": fmt_book(&project_weights(&c_h, &c)),
         "D_stop_redeploy": fmt_plan(&d),
@@ -134,6 +137,7 @@ fn main() {
     let cfg = Config::default();
     let contracts = config::load_contracts();
     let state_path = PathBuf::from("state.json");
+    let log_path = PathBuf::from("logs/equity.csv");
 
     // CMC signals (degrade to momentum-only if unavailable — never block trading).
     let mut cmc_sig = Signals::new();
@@ -160,13 +164,35 @@ fn main() {
     let mut st = State::load(&state_path);
     let now = now_secs();
 
-    let holdings = match tw.holdings() {
+    let mut holdings = match tw.holdings() {
         Ok(h) => h,
         Err(e) => {
             print_result(&serde_json::json!({"action": "error", "reason": e.to_string(), "swaps": []}), &regime);
             std::process::exit(1);
         }
     };
+    // twak's portfolio lists only whitelisted tokens, so a held meme is invisible to it. Value each
+    // universe token straight from chain (balanceOf x spot) so equity/stops/drawdown see real positions.
+    if args.sim_equity.is_none() {
+        if let Some(addr) = tw.address() {
+            for t in HIGHVOL {
+                if holdings.contains_key(t) {
+                    continue;
+                }
+                if let Some(c) = contracts.get(t) {
+                    if let Some(amt) = tw.token_balance(c, &addr) {
+                        if amt > 0.0 {
+                            if let Some(usd) = tw.spot_usd(c).map(|px| amt * px) {
+                                if usd > 0.01 {
+                                    holdings.insert(t.to_string(), usd);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     let eq = equity(&holdings);
     if eq < 1.0 {
         print_result(
@@ -179,10 +205,28 @@ fn main() {
 
     st.hwm = st.hwm.max(eq);
     let dd = drawdown(eq, st.hwm);
-    let held = risk_held(&holdings);
+    if args.sim_equity.is_none() {
+        if let Some(w) = monitor::gas_alert(&holdings) {
+            eprintln!("{w}"); // real wallet only; sim has no native BNB
+        }
+    }
+    let held = risk_held(&holdings, &cfg);
     let (peaks, entries) = track_positions(&held, &st.peaks, &st.entries);
     st.peaks = peaks;
     st.entries = entries;
+
+    // Hourly monitor pass: record equity/drawdown only, touch no positions, never trade.
+    if args.log_only {
+        monitor::log_equity(&log_path, now, eq, st.hwm, dd, "monitor");
+        let _ = st.save(&state_path);
+        print_result(
+            &serde_json::json!({"action": "monitor", "equity": (eq * 100.0).round() / 100.0,
+                                "hwm": (st.hwm * 100.0).round() / 100.0,
+                                "drawdown": (dd * 10000.0).round() / 10000.0, "swaps": []}),
+            &regime,
+        );
+        return;
+    }
 
     let decision = if breaker_tripped(eq, st.hwm, &cfg) {
         Decision::Breaker
@@ -192,6 +236,11 @@ fn main() {
         Decision::Normal
     };
 
+    let action_label = match &decision {
+        Decision::Breaker => "breaker",
+        Decision::Cooldown => "cooldown",
+        Decision::Normal => "normal",
+    };
     let usdt_only: Book = BTreeMap::from([(SETTLEMENT.to_string(), 1.0)]);
     let (plan, reason): (Vec<Swap>, String) = match decision {
         Decision::Breaker => {
@@ -229,7 +278,11 @@ fn main() {
     let target = project_weights(&holdings, &plan);
     assert!(worst_case_drawdown(&target) < 0.30, "post-trade book violates the 30% single-rug guard");
 
+    // Unattended live runs may supply the wallet password via env (kept out of argv/ps).
+    let password = args.password.clone().or_else(|| std::env::var("BNBAGENT_WALLET_PW").ok());
+
     let mut swaps = vec![];
+    let mut executed: Vec<String> = vec![];
     for s in &plan {
         let risk_tok = if s.src == SETTLEMENT { &s.dst } else { &s.src };
         let slip = cfg.slip_for(risk_tok);
@@ -245,10 +298,18 @@ fn main() {
                     swaps.push(serde_json::json!({"src": s.src, "dst": s.dst, "usd": s.usd, "status": "quoted",
                         "out": q.output, "minReceived": q.min_received}));
                 } else {
-                    match tw.swap(&src, &dst, s.usd, slip, args.password.as_deref()) {
-                        Ok(tx) => {
+                    match tw.swap(&src, &dst, s.usd, slip, password.as_deref()) {
+                        // twak returns exit 0 with an {error,...} body on failure (e.g. out of gas);
+                        // only a real tx hash is a genuine fill — anything else is a failure.
+                        Ok(tx) if tx.get("hash").and_then(|h| h.as_str()).is_some() => {
                             st.last_trade_ts = now;
+                            let hash = tx.get("hash").and_then(|h| h.as_str()).unwrap_or("");
+                            executed.push(format!("{} → {} ${:.2}  https://bscscan.com/tx/{hash}", s.src, s.dst, s.usd));
                             swaps.push(serde_json::json!({"src": s.src, "dst": s.dst, "usd": s.usd, "status": "executed", "tx": tx}));
+                        }
+                        Ok(tx) => {
+                            let err = tx.get("error").and_then(|e| e.as_str()).unwrap_or("no tx hash returned");
+                            swaps.push(serde_json::json!({"src": s.src, "dst": s.dst, "usd": s.usd, "status": format!("swap-failed: {err}")}));
                         }
                         Err(e) => swaps.push(serde_json::json!({"src": s.src, "dst": s.dst, "usd": s.usd, "status": format!("swap-failed: {e}")})),
                     }
@@ -258,12 +319,32 @@ fn main() {
     }
 
     let _ = st.save(&state_path);
+    monitor::log_equity(&log_path, now, eq, st.hwm, dd, action_label);
+    if !executed.is_empty() {
+        tg_notify(&format!(
+            "🤖 <b>BNB Agent</b> — {} trade(s) [{}]\n{}\nequity ${:.2} · DD {:.1}%",
+            executed.len(), action_label, executed.join("\n"), eq, dd * 100.0,
+        ));
+    }
     let result = serde_json::json!({
         "action": "rebalance", "reason": reason, "equity": (eq * 100.0).round() / 100.0,
         "hwm": (st.hwm * 100.0).round() / 100.0, "drawdown": (dd * 10000.0).round() / 10000.0,
         "target": target, "swaps": swaps,
     });
     print_result(&result, &regime);
+}
+
+/// Push a trade notification to the LEECH Telegram chat (the VPS is headless). Best-effort:
+/// reads BNB_TG_TOKEN + BNB_TG_CHAT from env, no-ops if unset, never blocks or fails the run.
+fn tg_notify(text: &str) {
+    let (Ok(token), Ok(chat)) = (std::env::var("BNB_TG_TOKEN"), std::env::var("BNB_TG_CHAT")) else {
+        return;
+    };
+    let url = format!("https://api.telegram.org/bot{token}/sendMessage");
+    let body = serde_json::json!({"chat_id": chat, "text": text, "parse_mode": "HTML"}).to_string();
+    let _ = std::process::Command::new("curl")
+        .args(["-s", "--max-time", "15", "-X", "POST", &url, "-H", "Content-Type: application/json", "--data", &body])
+        .output();
 }
 
 fn print_result(result: &serde_json::Value, regime: &Option<(i64, String)>) {
