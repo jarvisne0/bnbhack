@@ -47,6 +47,28 @@ pub fn breaker_tripped(eq: f64, hwm: f64, cfg: &Config) -> bool {
     drawdown(eq, hwm) >= cfg.dd_stop
 }
 
+/// Scale the deploy budget by the live Fear&Greed regime. A spot-only long book can't short a bear,
+/// so cash (USDC) is the defensive position: hold more of it in fear, deploy up to the configured
+/// `ceiling` only in greed. Match is case-insensitive (CMC returns e.g. "Extreme fear"); the result
+/// never exceeds `ceiling`, and an unknown/missing regime takes a neutral stance.
+pub fn regime_aggression(classification: &str, ceiling: f64) -> f64 {
+    let c = classification.to_lowercase();
+    let level: f64 = if c.contains("extreme fear") {
+        0.20
+    } else if c.contains("extreme greed") {
+        0.60
+    } else if c.contains("fear") {
+        0.35
+    } else if c.contains("greed") {
+        0.60
+    } else if c.contains("neutral") {
+        0.50
+    } else {
+        0.50
+    };
+    level.min(ceiling)
+}
+
 /// Largest single-token weight = worst instantaneous loss if one vehicle rugs to zero.
 pub fn worst_case_drawdown(target: &Book) -> f64 {
     target
@@ -203,6 +225,17 @@ mod tests {
         assert_eq!(drawdown(120.0, 100.0), 0.0); // above peak clamped
         assert!((drawdown(75.0, 100.0) - 0.25).abs() < 1e-12);
         assert_eq!(drawdown(0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn regime_aggression_scales_by_fear() {
+        assert_eq!(regime_aggression("Extreme fear", 0.60), 0.20);
+        assert_eq!(regime_aggression("Fear", 0.60), 0.35);
+        assert_eq!(regime_aggression("Neutral", 0.60), 0.50);
+        assert_eq!(regime_aggression("Greed", 0.60), 0.60);
+        assert_eq!(regime_aggression("Extreme greed", 0.60), 0.60);
+        assert_eq!(regime_aggression("", 0.60), 0.50); // unknown -> neutral
+        assert!((regime_aggression("neutral", 0.30) - 0.30).abs() < 1e-12); // capped by ceiling
     }
 
     #[test]

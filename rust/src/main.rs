@@ -23,8 +23,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use config::{Config, HIGHVOL, SETTLEMENT};
 use risk::{
-    breaker_tripped, drawdown, dynamic_plan, equity, project_weights, rebalance_plan, risk_held,
-    stop_exits, track_positions, worst_case_drawdown, Book, Decision, Swap,
+    breaker_tripped, drawdown, dynamic_plan, equity, project_weights, rebalance_plan,
+    regime_aggression, risk_held, stop_exits, track_positions, worst_case_drawdown, Book, Decision, Swap,
 };
 use selector::{select, Signals};
 use state::State;
@@ -134,7 +134,7 @@ fn main() {
         return;
     }
     let args = parse_args();
-    let cfg = Config::default();
+    let mut cfg = Config::default();
     let contracts = config::load_contracts();
     let state_path = PathBuf::from("state.json");
     let log_path = PathBuf::from("logs/equity.csv");
@@ -155,6 +155,11 @@ fn main() {
             Err(e) => eprintln!("# CMC unavailable ({e}); selecting on momentum alone"),
         }
     }
+    // Spot-only long book can't short a bear: scale the deploy budget down in fear (hold cash),
+    // up to the configured ceiling only in greed. No regime signal -> neutral stance.
+    if let Some((_, cls)) = &regime {
+        cfg.aggression = regime_aggression(cls, cfg.aggression);
+    }
 
     let tw = match args.sim_equity {
         Some(eq) => Twak::with_sim(&args.chain, eq),
@@ -172,26 +177,50 @@ fn main() {
         }
     };
     // twak's portfolio lists only whitelisted tokens, so a held meme is invisible to it. Value each
-    // universe token straight from chain (balanceOf x spot) so equity/stops/drawdown see real positions.
+    // universe token straight from chain (balanceOf x spot). `incomplete` flags any held position we
+    // could not value this pass — acting on the resulting understated equity would spuriously trip
+    // the DD breaker, so we hold instead.
+    let mut incomplete = false;
     if args.sim_equity.is_none() {
-        if let Some(addr) = tw.address() {
-            for t in HIGHVOL {
-                if holdings.contains_key(t) {
-                    continue;
-                }
-                if let Some(c) = contracts.get(t) {
-                    if let Some(amt) = tw.token_balance(c, &addr) {
-                        if amt > 0.0 {
-                            if let Some(usd) = tw.spot_usd(c).map(|px| amt * px) {
+        match tw.address() {
+            None => incomplete = true,
+            Some(addr) => {
+                for t in HIGHVOL {
+                    if holdings.contains_key(t) {
+                        continue;
+                    }
+                    let Some(c) = contracts.get(t) else { continue };
+                    match tw.token_balance(c, &addr) {
+                        None => {
+                            eprintln!("# WARN balanceOf {t} unreadable — holdings incomplete");
+                            incomplete = true;
+                        }
+                        Some(amt) if amt > 0.0 => match tw.spot_usd(c) {
+                            Some(px) => {
+                                let usd = amt * px;
                                 if usd > 0.01 {
                                     holdings.insert(t.to_string(), usd);
                                 }
                             }
-                        }
+                            None => {
+                                eprintln!("# WARN held {t} ({amt}) unpriceable — holdings incomplete");
+                                incomplete = true;
+                            }
+                        },
+                        Some(_) => {} // zero balance: not held
                     }
                 }
             }
         }
+    }
+    if incomplete {
+        print_result(
+            &serde_json::json!({"action": "hold",
+                "reason": "holdings valuation incomplete (RPC/price unavailable) — skipping to avoid acting on understated equity",
+                "swaps": []}),
+            &regime,
+        );
+        return;
     }
     let eq = equity(&holdings);
     if eq < 1.0 {
@@ -329,7 +358,7 @@ fn main() {
     let result = serde_json::json!({
         "action": "rebalance", "reason": reason, "equity": (eq * 100.0).round() / 100.0,
         "hwm": (st.hwm * 100.0).round() / 100.0, "drawdown": (dd * 10000.0).round() / 10000.0,
-        "target": target, "swaps": swaps,
+        "aggression": cfg.aggression, "target": target, "swaps": swaps,
     });
     print_result(&result, &regime);
 }

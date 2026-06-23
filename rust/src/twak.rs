@@ -135,11 +135,19 @@ impl Twak {
         v.get("address")?.as_str().map(str::to_string)
     }
 
-    /// Current spot price in USD for a token, via twak's price feed.
+    /// Current spot price in USD for a token, via twak's price feed. Retries: a transient miss here
+    /// would drop a held position from the book and understate equity → a spurious DD breaker.
     pub fn spot_usd(&self, contract: &str) -> Option<f64> {
-        let v = self.run(&["price", contract, "--chain", &self.chain, "--history", "day", "--json"]).ok()?;
-        let ph: PriceHistory = serde_json::from_value(v).ok()?;
-        ph.price_usd.as_ref().and_then(as_f64)
+        for _ in 0..3 {
+            if let Ok(v) = self.run(&["price", contract, "--chain", &self.chain, "--history", "day", "--json"]) {
+                if let Ok(ph) = serde_json::from_value::<PriceHistory>(v) {
+                    if let Some(p) = ph.price_usd.as_ref().and_then(as_f64) {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Raw BEP-20 `balanceOf` in token units (assumes 18 decimals — true for the meme universe),
@@ -150,13 +158,23 @@ impl Twak {
         let body = format!(
             r#"{{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{{"to":"{contract}","data":"{data}"}},"latest"]}}"#
         );
-        let out = Command::new("curl")
-            .args(["-s", "--max-time", "15", "-X", "POST", BSC_RPC,
-                   "-H", "Content-Type: application/json", "--data", &body])
-            .output().ok()?;
-        let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-        let hex = v.get("result")?.as_str()?.trim_start_matches("0x");
-        Some(u128::from_str_radix(hex, 16).ok()? as f64 / 1e18)
+        for _ in 0..3 {
+            let Ok(out) = Command::new("curl")
+                .args(["-s", "--max-time", "15", "-X", "POST", BSC_RPC,
+                       "-H", "Content-Type: application/json", "--data", &body])
+                .output()
+            else {
+                continue;
+            };
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                if let Some(hex) = v.get("result").and_then(|r| r.as_str()) {
+                    if let Ok(raw) = u128::from_str_radix(hex.trim_start_matches("0x"), 16) {
+                        return Some(raw as f64 / 1e18);
+                    }
+                }
+            }
+        }
+        None
     }
 
     pub fn quote(&self, src: &str, dst: &str, usd: f64, slippage: f64) -> R<Quote> {

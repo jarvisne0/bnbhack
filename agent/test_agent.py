@@ -9,8 +9,8 @@ from pathlib import Path
 
 from .config import Config, SETTLEMENT
 from .risk import (breaker_tripped, drawdown, dynamic_plan, equity, project_weights,
-                   rebalance_plan, stop_exits, target_weights, track_positions,
-                   worst_case_drawdown)
+                   rebalance_plan, regime_aggression, stop_exits, target_weights,
+                   track_positions, worst_case_drawdown)
 from .selector import score, select
 from . import agent as agentmod
 
@@ -35,6 +35,15 @@ class TestDrawdown(unittest.TestCase):
         self.assertTrue(breaker_tripped(75.0, 100.0, CFG))            # 25% == dd_stop
         self.assertFalse(breaker_tripped(75.01, 100.0, CFG))
         self.assertTrue(breaker_tripped(60.0, 100.0, CFG))            # 40% > dd_stop
+
+    def test_regime_aggression_scales_by_fear(self):
+        self.assertEqual(regime_aggression("Extreme fear", 0.60), 0.20)
+        self.assertEqual(regime_aggression("Fear", 0.60), 0.35)
+        self.assertEqual(regime_aggression("Neutral", 0.60), 0.50)
+        self.assertEqual(regime_aggression("Greed", 0.60), 0.60)
+        self.assertEqual(regime_aggression("Extreme greed", 0.60), 0.60)
+        self.assertEqual(regime_aggression("", 0.60), 0.50)          # unknown -> neutral
+        self.assertEqual(regime_aggression("neutral", 0.30), 0.30)   # capped by ceiling
 
 
 class TestTargetWeights(unittest.TestCase):

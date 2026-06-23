@@ -12,10 +12,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 
 from .agent import run_once
 from .cmc import Cmc
 from .config import Config, SETTLEMENT, load_contracts
+from .risk import regime_aggression
 from .twakcli import Twak
 
 
@@ -44,8 +46,15 @@ def main(argv=None):
         except Exception as e:  # CMC down -> degrade to momentum-only, never block trading
             print(f"# CMC unavailable ({e}); selecting on momentum alone", file=sys.stderr)
 
-    result = run_once(tw, Config(), contracts=load_contracts(), cmc=cmc_sig,
+    # Spot-only long book can't short a bear: scale the deploy budget down in fear, up to the
+    # configured ceiling only in greed. No regime signal -> neutral stance.
+    cfg = Config()
+    if regime:
+        cfg = replace(cfg, aggression=regime_aggression(regime["classification"], cfg.aggression))
+
+    result = run_once(tw, cfg, contracts=load_contracts(), cmc=cmc_sig,
                       password=args.password)
+    result["aggression"] = cfg.aggression
     if regime:
         result["fear_greed"] = regime
     print(json.dumps(result, indent=2))

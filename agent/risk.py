@@ -26,6 +26,28 @@ def breaker_tripped(eq: float, hwm: float, cfg: Config) -> bool:
     return drawdown(eq, hwm) >= cfg.dd_stop
 
 
+def regime_aggression(classification: str, ceiling: float) -> float:
+    """Scale the deploy budget by the live Fear&Greed regime. A spot-only long book can't short a
+    bear, so cash (USDC) is the defensive position: hold more of it in fear, deploy up to `ceiling`
+    only in greed. Match is case-insensitive (CMC returns e.g. "Extreme fear"); the result never
+    exceeds `ceiling`, and an unknown/missing regime takes a neutral stance.
+    """
+    c = classification.lower()
+    if "extreme fear" in c:
+        level = 0.20
+    elif "extreme greed" in c:
+        level = 0.60
+    elif "fear" in c:
+        level = 0.35
+    elif "greed" in c:
+        level = 0.60
+    elif "neutral" in c:
+        level = 0.50
+    else:
+        level = 0.50
+    return min(level, ceiling)
+
+
 def target_weights(scores: dict[str, float], cfg: Config) -> dict[str, float]:
     """Convex, concentration-capped target allocation (fractions summing to 1.0).
 
