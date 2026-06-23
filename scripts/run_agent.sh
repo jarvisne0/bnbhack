@@ -27,7 +27,10 @@ fi
 
 case "$MODE" in
   dry)   exec "$BIN" ;;
-  log)   exec "$BIN" --log-only --no-cmc ;;
+  log)
+    # read-only monitor: still needs the wallet password to read the portfolio (no --live, no tx)
+    [ -f "$HOME/.config/bnbagent/wallet_pw" ] && export TWAK_WALLET_PASSWORD="$(< "$HOME/.config/bnbagent/wallet_pw")"
+    exec "$BIN" --log-only --no-cmc ;;
   trade)
     PW_FILE="$HOME/.config/bnbagent/wallet_pw"
     [ -f "$PW_FILE" ] || { echo "FATAL: $PW_FILE missing — cannot arm live trading (no silent fallback)" >&2; exit 1; }
