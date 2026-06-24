@@ -51,10 +51,13 @@ pub fn breaker_tripped(eq: f64, hwm: f64, cfg: &Config) -> bool {
 /// so cash (USDC) is the defensive position: hold more of it in fear, deploy up to the configured
 /// `ceiling` only in greed. Match is case-insensitive (CMC returns e.g. "Extreme fear"); the result
 /// never exceeds `ceiling`, and an unknown/missing regime takes a neutral stance.
+/// Contrarian, NOT momentum: extreme fear is an oversold dip to buy (our only proven edge is weak
+/// mean-reversion), so it is a deploy regime — floored at 0.30 so a single slot clears the $1
+/// minimum at a ~$4 bankroll rather than sitting out the bottom. Greed stays capped (don't chase).
 pub fn regime_aggression(classification: &str, ceiling: f64) -> f64 {
     let c = classification.to_lowercase();
     let level: f64 = if c.contains("extreme fear") {
-        0.20
+        0.30
     } else if c.contains("extreme greed") {
         0.60
     } else if c.contains("fear") {
@@ -229,7 +232,7 @@ mod tests {
 
     #[test]
     fn regime_aggression_scales_by_fear() {
-        assert_eq!(regime_aggression("Extreme fear", 0.60), 0.20);
+        assert_eq!(regime_aggression("Extreme fear", 0.60), 0.30); // contrarian: oversold dip = deploy
         assert_eq!(regime_aggression("Fear", 0.60), 0.35);
         assert_eq!(regime_aggression("Neutral", 0.60), 0.50);
         assert_eq!(regime_aggression("Greed", 0.60), 0.60);

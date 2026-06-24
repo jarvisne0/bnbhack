@@ -50,7 +50,7 @@ class Config:
 
     # --- behaviour (tunable with user) ---
     aggression: float = 0.60    # target risk-on fraction (capped at 1 - stable_floor)
-    n_vehicles: int = 2         # spread convexity across this many names; 2 keeps each >= $1 on a ~$4 bankroll
+    n_vehicles: int = 1         # ~$4 bankroll + $1 floor + 20% reserve: budget/2 never clears $1 outside Greed (=> all-cash); 1 concentrated slot is the only fillable shape
     cadence_h: int = 2          # rebalance cadence; faster reaction now that trading is ~free
     cooldown_h: int = 12        # after a breaker trip, stay in USDT this long
 

@@ -52,7 +52,10 @@ impl Default for Config {
         let cfg = Config {
             dd_stop: 0.25, max_token: 0.27, hard_cap: 0.28, stable_floor: 0.20,
             slip: 0.02, min_swap: 1.0, trail: 0.15, stop_loss: 0.12,
-            aggression: 0.60, n_vehicles: 2, cooldown_h: 12.0, slip_overrides,
+            // n_vehicles=1: at a ~$4 bankroll with a $1 hackathon floor and a 20% stable reserve,
+            // budget/2 can never clear $1 outside Greed (every Fear pass produced swaps:[] and we
+            // sat 97% cash). One concentrated slot (<=max_token=27%) is the only fillable shape here.
+            aggression: 0.60, n_vehicles: 1, cooldown_h: 12.0, slip_overrides,
         };
         cfg.check();
         cfg

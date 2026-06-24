@@ -37,7 +37,7 @@ class TestDrawdown(unittest.TestCase):
         self.assertTrue(breaker_tripped(60.0, 100.0, CFG))            # 40% > dd_stop
 
     def test_regime_aggression_scales_by_fear(self):
-        self.assertEqual(regime_aggression("Extreme fear", 0.60), 0.20)
+        self.assertEqual(regime_aggression("Extreme fear", 0.60), 0.30)  # contrarian: oversold dip = deploy
         self.assertEqual(regime_aggression("Fear", 0.60), 0.35)
         self.assertEqual(regime_aggression("Neutral", 0.60), 0.50)
         self.assertEqual(regime_aggression("Greed", 0.60), 0.60)

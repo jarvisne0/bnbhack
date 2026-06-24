@@ -27,14 +27,14 @@ def breaker_tripped(eq: float, hwm: float, cfg: Config) -> bool:
 
 
 def regime_aggression(classification: str, ceiling: float) -> float:
-    """Scale the deploy budget by the live Fear&Greed regime. A spot-only long book can't short a
-    bear, so cash (USDC) is the defensive position: hold more of it in fear, deploy up to `ceiling`
-    only in greed. Match is case-insensitive (CMC returns e.g. "Extreme fear"); the result never
-    exceeds `ceiling`, and an unknown/missing regime takes a neutral stance.
+    """Scale the deploy budget by the live Fear&Greed regime. Contrarian, not momentum: extreme fear
+    is an oversold dip to buy (our only proven edge is weak mean-reversion), so it is a deploy regime
+    floored at 0.30 so a single slot clears the $1 minimum at a ~$4 bankroll instead of sitting out the
+    bottom; greed stays capped (don't chase). Case-insensitive; result never exceeds `ceiling`.
     """
     c = classification.lower()
     if "extreme fear" in c:
-        level = 0.20
+        level = 0.30
     elif "extreme greed" in c:
         level = 0.60
     elif "fear" in c:
