@@ -13,6 +13,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+# cron runs with a bare PATH; twak lives in the user npm prefix and the binary spawns it by name.
+export PATH="$HOME/.npm-global/bin:$PATH"
 BIN="$ROOT/rust/target/release/bnbagent"
 MODE="${1:-dry}"
 
