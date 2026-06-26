@@ -8,9 +8,9 @@ import unittest
 from pathlib import Path
 
 from .config import Config, SETTLEMENT
-from .risk import (breaker_tripped, drawdown, dynamic_plan, equity, project_weights,
-                   rebalance_plan, regime_aggression, stop_exits, target_weights,
-                   track_positions, worst_case_drawdown)
+from .risk import (breaker_tripped, drawdown, dynamic_plan, equity, heartbeat_plan,
+                   project_weights, rebalance_plan, regime_aggression, stop_exits,
+                   target_weights, track_positions, worst_case_drawdown)
 from .selector import score, select
 from . import agent as agentmod
 
@@ -280,6 +280,42 @@ class TestLoop(unittest.TestCase):
         r = agentmod.run_once(tw, CFG, contracts=self.contracts, cmc=self.cmc,
                               now=0.0, state_path=self.tmp)
         self.assertTrue(all("slippage" in s["status"] for s in r["swaps"]))
+
+
+class TestHeartbeat(unittest.TestCase):
+    def test_round_trips_largest_holding(self):
+        plan = heartbeat_plan({"SKYAI": 3.0, "TAG": 2.0, SETTLEMENT: 5.0}, {}, CFG)
+        self.assertEqual(plan, [("SKYAI", SETTLEMENT, 1.0), (SETTLEMENT, "SKYAI", 1.0)])
+
+    def test_deploys_top_pick_when_all_cash(self):
+        plan = heartbeat_plan({SETTLEMENT: 100.0}, {"TAG": 1.0, "SIREN": 0.8}, CFG)
+        self.assertEqual(plan, [(SETTLEMENT, "TAG", 1.0)])
+
+    def test_holds_when_floor_would_break(self):
+        self.assertEqual(heartbeat_plan({SETTLEMENT: 1.0}, {"TAG": 1.0}, CFG), [])
+
+
+class TestHeartbeatLoop(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()) / "state.json"
+        self.contracts = {t: f"0x{t}" for t in ["SKYAI", "BANANAS31", "TAG", "SIREN", "MYX", "DEXE"]}
+        self.cmc = {t: {"sentiment": 1.0, "trending": 1.0} for t in self.contracts}
+
+    def test_stale_converged_book_forces_activity_swap(self):
+        # slot full + cash at the floor: dynamic_plan is empty, but last trade is ancient -> heartbeat
+        tw = FakeTwak({"SKYAI": 270.0, SETTLEMENT: 730.0})
+        r = agentmod.run_once(tw, CFG, contracts=self.contracts, cmc=self.cmc,
+                              now=1e6, state_path=self.tmp)
+        self.assertIn("heartbeat", r["reason"])
+        self.assertTrue(r["swaps"])  # would otherwise be [] on a converged book
+
+    def test_recent_trade_no_heartbeat(self):
+        agentmod.State(hwm=1000.0, last_trade_ts=1e6 - 3600).save(self.tmp)  # traded 1h ago
+        tw = FakeTwak({"SKYAI": 270.0, SETTLEMENT: 730.0})
+        r = agentmod.run_once(tw, CFG, contracts=self.contracts, cmc=self.cmc,
+                              now=1e6, state_path=self.tmp)
+        self.assertNotIn("heartbeat", r["reason"])
+        self.assertEqual(r["swaps"], [])
 
 
 if __name__ == "__main__":

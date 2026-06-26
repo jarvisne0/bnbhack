@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent.config import Config, SETTLEMENT
-from agent.risk import dynamic_plan, project_weights, rebalance_plan
+from agent.risk import dynamic_plan, heartbeat_plan, project_weights, rebalance_plan
 from agent.selector import select
 
 cfg = Config()
@@ -39,6 +39,8 @@ c = dynamic_plan(c_h, picks, set(), cfg)
 d_h = {"SKYAI": 200.0, "TAG": 200.0, SETTLEMENT: 600.0}
 d = dynamic_plan(d_h, picks, {"TAG"}, cfg)
 e = rebalance_plan({"SKYAI": 250.0, "TAG": 250.0, SETTLEMENT: 500.0}, {SETTLEMENT: 1.0}, cfg)
+f1 = heartbeat_plan({"SKYAI": 300.0, "TAG": 250.0, SETTLEMENT: 450.0}, picks, cfg)
+f2 = heartbeat_plan({SETTLEMENT: 1000.0}, picks, cfg)
 
 print(json.dumps({
     "A_select": fmt_book(picks),
@@ -48,4 +50,6 @@ print(json.dumps({
     "C_weights": fmt_book(project_weights(c_h, c)),
     "D_stop_redeploy": fmt_plan(d),
     "E_rotation": fmt_plan(e),
+    "F_heartbeat_held": fmt_plan(f1),
+    "F_heartbeat_cash": fmt_plan(f2),
 }, indent=2, sort_keys=True))

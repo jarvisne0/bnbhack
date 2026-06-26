@@ -39,6 +39,7 @@ pub struct Config {
     pub aggression: f64,    // target risk-on fraction (capped at 1 - stable_floor)
     pub n_vehicles: usize,  // spread convexity across this many names
     pub cooldown_h: f64,    // after a breaker trip, stay in USDT this long
+    pub heartbeat_h: f64,   // force a minimal compliant trade if no fill in this many hours (activity gate)
 
     slip_overrides: BTreeMap<String, f64>,
 }
@@ -55,7 +56,10 @@ impl Default for Config {
             // n_vehicles=1: at a ~$4 bankroll with a $1 hackathon floor and a 20% stable reserve,
             // budget/2 can never clear $1 outside Greed (every Fear pass produced swaps:[] and we
             // sat 97% cash). One concentrated slot (<=max_token=27%) is the only fillable shape here.
-            aggression: 0.60, n_vehicles: 1, cooldown_h: 12.0, slip_overrides,
+            // heartbeat_h=20: a converged book legitimately emits no swap for days, but the comp
+            // requires >=1 trade/day. After 20h with no fill, force one minimal compliant round-trip
+            // (margin under 24h so it fires at the next 2h pass, not on the deadline).
+            aggression: 0.60, n_vehicles: 1, cooldown_h: 12.0, heartbeat_h: 20.0, slip_overrides,
         };
         cfg.check();
         cfg
@@ -73,6 +77,7 @@ impl Config {
                 "aggression must leave the stable floor");
         assert!(self.trail > 0.0 && self.trail < 1.0 && self.stop_loss > 0.0 && self.stop_loss < 1.0);
         assert!(self.n_vehicles >= 1);
+        assert!(self.heartbeat_h > 0.0, "heartbeat_h must be positive");
     }
 
     pub fn slip_for(&self, token: &str) -> f64 {

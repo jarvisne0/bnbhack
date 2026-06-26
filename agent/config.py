@@ -53,6 +53,7 @@ class Config:
     n_vehicles: int = 1         # ~$4 bankroll + $1 floor + 20% reserve: budget/2 never clears $1 outside Greed (=> all-cash); 1 concentrated slot is the only fillable shape
     cadence_h: int = 2          # rebalance cadence; faster reaction now that trading is ~free
     cooldown_h: int = 12        # after a breaker trip, stay in USDT this long
+    heartbeat_h: float = 20.0   # force a minimal compliant trade if no fill in this many hours (>=1/day activity gate)
 
     # --- per-token slippage overrides for thin memes ---
     slip_overrides: dict[str, float] = field(default_factory=lambda: {
@@ -66,6 +67,7 @@ class Config:
         assert 0 <= self.aggression <= 1 - self.stable_floor, "aggression must leave the stable floor"
         assert 0 < self.trail < 1 and 0 < self.stop_loss < 1
         assert self.n_vehicles >= 1
+        assert self.heartbeat_h > 0, "heartbeat_h must be positive"
 
     def slip_for(self, token: str) -> float:
         return self.slip_overrides.get(token, self.slip)

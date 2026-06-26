@@ -194,6 +194,35 @@ pub fn dynamic_plan(holdings: &Book, picks: &Book, exits: &BTreeSet<String>, cfg
     sells
 }
 
+/// Daily-activity heartbeat. The competition requires >=1 qualifying trade per day, but a converged
+/// book legitimately produces no swap for days (slot full, cash at the floor, no stop/trim). When the
+/// normal plan is empty and the last fill is stale, force the smallest compliant trade:
+///   - if a meme is held, a flat round-trip on the largest position (sell then rebuy `min_swap` —
+///     net allocation unchanged, two qualifying legs);
+///   - else deploy one `min_swap` into the top pick, but only if that keeps the stable floor.
+/// Pure and deterministic in (holdings, picks); the caller gates it on staleness. Largest holding /
+/// top pick break ties by token ascending, matching the rest of the engine.
+pub fn heartbeat_plan(holdings: &Book, picks: &Book, cfg: &Config) -> Vec<Swap> {
+    let held = risk_held(holdings, cfg);
+    if !held.is_empty() {
+        let (t, _) = held
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap().then_with(|| b.0.cmp(a.0)))
+            .unwrap();
+        return vec![swap(t, SETTLEMENT, cfg.min_swap), swap(SETTLEMENT, t, cfg.min_swap)];
+    }
+    let eq = equity(holdings);
+    let free = holdings.get(SETTLEMENT).copied().unwrap_or(0.0);
+    if !picks.is_empty() && free - cfg.min_swap >= cfg.stable_floor * eq {
+        let (t, _) = picks
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap().then_with(|| b.0.cmp(a.0)))
+            .unwrap();
+        return vec![swap(SETTLEMENT, t, cfg.min_swap)];
+    }
+    vec![]
+}
+
 /// Resulting weights if `plan` fills — used to assert the post-trade book stays under the DQ line.
 pub fn project_weights(holdings: &Book, plan: &[Swap]) -> Book {
     let eq = equity(holdings);
@@ -338,6 +367,33 @@ mod tests {
         let h = book(&[("SKYAI", 270.0), (SETTLEMENT,730.0)]); // 27% < 28% ceiling
         let plan = dynamic_plan(&h, &Book::new(), &BTreeSet::new(), &cfg());
         assert!(!has_sell(&plan, "SKYAI"));
+    }
+
+    #[test]
+    fn heartbeat_round_trips_largest_holding() {
+        // converged book, nothing else to do: flat round-trip on the largest meme (SKYAI), net zero
+        let h = book(&[("SKYAI", 2.0), ("TAG", 1.0), (SETTLEMENT, 7.0)]);
+        let plan = heartbeat_plan(&h, &Book::new(), &cfg());
+        assert_eq!(plan.len(), 2);
+        assert_eq!((plan[0].src.as_str(), plan[0].dst.as_str()), ("SKYAI", SETTLEMENT));
+        assert_eq!((plan[1].src.as_str(), plan[1].dst.as_str()), (SETTLEMENT, "SKYAI"));
+        assert!(plan.iter().all(|s| (s.usd - cfg().min_swap).abs() < 1e-9));
+        // net allocation unchanged -> still under the rug guard
+        assert!(worst_case_drawdown(&project_weights(&h, &plan)) < 0.30);
+    }
+
+    #[test]
+    fn heartbeat_deploys_top_pick_when_all_cash() {
+        let plan = heartbeat_plan(&book(&[(SETTLEMENT, 100.0)]), &book(&[("TAG", 1.0), ("SIREN", 0.5)]), &cfg());
+        assert_eq!(plan.len(), 1);
+        assert_eq!((plan[0].src.as_str(), plan[0].dst.as_str()), (SETTLEMENT, "TAG")); // highest score
+    }
+
+    #[test]
+    fn heartbeat_holds_when_floor_would_break() {
+        // free cash can't cover a min_swap and keep the stable floor -> no forced trade
+        let plan = heartbeat_plan(&book(&[(SETTLEMENT, 1.0)]), &book(&[("TAG", 1.0)]), &cfg());
+        assert!(plan.is_empty());
     }
 
     #[test]

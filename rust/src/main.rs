@@ -23,7 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use config::{Config, HIGHVOL, SETTLEMENT};
 use risk::{
-    breaker_tripped, drawdown, dynamic_plan, equity, project_weights, rebalance_plan,
+    breaker_tripped, drawdown, dynamic_plan, equity, heartbeat_plan, project_weights, rebalance_plan,
     regime_aggression, risk_held, stop_exits, track_positions, worst_case_drawdown, Book, Decision, Swap,
 };
 use selector::{select, Signals};
@@ -116,6 +116,9 @@ fn parity_dump() -> serde_json::Value {
     let d_h = book(&[("SKYAI", 200.0), ("TAG", 200.0), (SETTLEMENT,600.0)]);
     let d = dynamic_plan(&d_h, &picks, &BTreeSet::from(["TAG".to_string()]), &cfg);
     let e = rebalance_plan(&book(&[("SKYAI", 250.0), ("TAG", 250.0), (SETTLEMENT,500.0)]), &BTreeMap::from([(SETTLEMENT.to_string(), 1.0)]), &cfg);
+    // F: daily-activity heartbeat — round-trip the largest holding; deploy top pick when all-cash
+    let f1 = heartbeat_plan(&book(&[("SKYAI", 300.0), ("TAG", 250.0), (SETTLEMENT, 450.0)]), &picks, &cfg);
+    let f2 = heartbeat_plan(&book(&[(SETTLEMENT, 1000.0)]), &picks, &cfg);
 
     serde_json::json!({
         "A_select": fmt_book(&picks),
@@ -125,6 +128,8 @@ fn parity_dump() -> serde_json::Value {
         "C_weights": fmt_book(&project_weights(&c_h, &c)),
         "D_stop_redeploy": fmt_plan(&d),
         "E_rotation": fmt_plan(&e),
+        "F_heartbeat_held": fmt_plan(&f1),
+        "F_heartbeat_cash": fmt_plan(&f2),
     })
 }
 
@@ -288,18 +293,28 @@ fn main() {
         Decision::Normal => {
             let exits = stop_exits(&held, &st.peaks, &st.entries, &cfg);
             let picks = select_picks(&tw, &cfg, &contracts, &cmc_sig);
-            let plan = dynamic_plan(&holdings, &picks, &exits, &cfg);
+            let mut plan = dynamic_plan(&holdings, &picks, &exits, &cfg);
             for t in &exits {
                 st.peaks.remove(t);
                 st.entries.remove(t);
             }
             let picks_v: Vec<&String> = picks.keys().collect();
             let stopped = if exits.is_empty() { String::new() } else { format!(", stopped {:?}", exits) };
-            let reason = if picks.is_empty() && exits.is_empty() {
+            let mut reason = if picks.is_empty() && exits.is_empty() {
                 "no vehicle passed risk/selection".to_string()
             } else {
                 format!("hold/deploy: picks {:?}{}", picks_v, stopped)
             };
+            // Activity gate: a converged book trades nothing for days, but the comp needs >=1/day.
+            // If nothing else fires and the last fill is stale, force one minimal compliant swap.
+            let stale_h = (now - st.last_trade_ts) / 3600.0;
+            if plan.is_empty() && stale_h > cfg.heartbeat_h {
+                let hb = heartbeat_plan(&holdings, &picks, &cfg);
+                if !hb.is_empty() {
+                    reason = format!("heartbeat: {stale_h:.0}h since last trade >= {:.0}h — forced activity swap", cfg.heartbeat_h);
+                    plan = hb;
+                }
+            }
             (plan, reason)
         }
     };

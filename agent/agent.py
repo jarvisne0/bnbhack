@@ -14,8 +14,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .config import Config, HIGHVOL, SETTLEMENT, load_contracts
-from .risk import (breaker_tripped, drawdown, dynamic_plan, equity, project_weights,
-                   rebalance_plan, stop_exits, track_positions, worst_case_drawdown)
+from .risk import (breaker_tripped, drawdown, dynamic_plan, equity, heartbeat_plan,
+                   project_weights, rebalance_plan, stop_exits, track_positions,
+                   worst_case_drawdown)
 from .selector import select
 from .signals import gather
 from .twakcli import Twak, TwakError
@@ -95,6 +96,14 @@ def run_once(tw: Twak, cfg: Config, *, contracts: dict[str, str] | None = None,
                   else "no vehicle passed risk/selection")
         for t in exits:                                  # closed positions drop their stop state
             st.peaks.pop(t, None); st.entries.pop(t, None)
+        # Activity gate: a converged book trades nothing for days, but the comp needs >=1/day. If
+        # nothing else fires and the last fill is stale, force one minimal compliant swap.
+        stale_h = (now - st.last_trade_ts) / 3600
+        if not plan and stale_h > cfg.heartbeat_h:
+            hb = heartbeat_plan(holdings, picks, cfg)
+            if hb:
+                plan = hb
+                reason = f"heartbeat: {stale_h:.0f}h since last trade >= {cfg.heartbeat_h:.0f}h — forced activity swap"
 
     target = project_weights(holdings, plan)
     assert worst_case_drawdown(target) < 0.30, "post-trade book violates the 30% single-rug guard"
